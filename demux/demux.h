@@ -76,6 +76,7 @@ struct demux_opts {
     double min_secs_cache;
     bool access_references;
     int seekable_cache;
+    bool cache_unselected_subs;
     int index_mode;
     double mf_fps;
     char *mf_type;

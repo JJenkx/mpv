@@ -4272,6 +4272,18 @@ Demuxer
     ``--cache-secs`` is used (i.e. when the stream appears to be a network
     stream or the stream cache is enabled).
 
+``--demuxer-cache-unselected-subs=<yes|no>``
+    Cache packets of subtitle tracks even while they are not selected
+    (default: yes). This applies only when the seekable demuxer cache is
+    active (see ``--demuxer-seekable-cache``), i.e. typically network
+    streams. Normally, selecting a previously unselected track triggers a
+    refresh seek, which drops the forward cache - with network streams, all
+    readahead data has to be downloaded again. With this option, enabling or
+    switching subtitle tracks reuses the already cached subtitle packets and
+    keeps the cache intact. Subtitle packets are small, so the additional
+    memory use is negligible.
+
+
 ``--demuxer-thread=<yes|no>``
     Run the demuxer in a separate thread, and let it prefetch a certain amount
     of packets (default: yes). Having this enabled leads to smoother playback,

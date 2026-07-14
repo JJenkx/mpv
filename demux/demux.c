@@ -114,6 +114,7 @@ const struct m_sub_options demux_conf = {
         {"access-references", OPT_BOOL(access_references)},
         {"demuxer-seekable-cache", OPT_CHOICE(seekable_cache,
             {"auto", -1}, {"no", 0}, {"yes", 1})},
+        {"demuxer-cache-unselected-subs", OPT_BOOL(cache_unselected_subs)},
         {"index", OPT_CHOICE(index_mode, {"default", 1}, {"recreate", 0})},
         {"mf-fps", OPT_DOUBLE(mf_fps)},
         {"mf-type", OPT_STRING(mf_type)},
@@ -144,6 +145,7 @@ const struct m_sub_options demux_conf = {
         .min_secs = 1.0,
         .min_secs_cache = 1000.0 * 60 * 60,
         .seekable_cache = -1,
+        .cache_unselected_subs = true,
         .index_mode = 1,
         .mf_fps = 1.0,
         .access_references = true,
@@ -368,6 +370,9 @@ struct demux_queue {
 
     bool is_bof;            // started demuxing at beginning of file
     bool is_eof;            // received true EOF here
+    bool incomplete;        // may be missing packets from before its first
+                            // packet (stream added mid-demuxing, or queue
+                            // cleared while the range already had data)
 
     // Complete index, though it may skip some entries to reduce density.
     struct index_entry *index;  // ring buffer
@@ -760,6 +765,7 @@ static void clear_queue(struct demux_queue *queue)
 
     queue->is_eof = false;
     queue->is_bof = false;
+    queue->incomplete = true; // (set to false where a queue starts fresh)
 }
 
 static void clear_cached_range(struct demux_internal *in,
@@ -878,6 +884,21 @@ static void wakeup_ds(struct demux_stream *ds)
     }
 }
 
+// Whether packets of this stream are cached even while it is not selected, so
+// that selecting it later does not require a refresh seek. A refresh seek
+// drops the forward cache, which is expensive with network streams (all
+// readahead data has to be downloaded again - and the data of all tracks is
+// downloaded anyway, since it is interleaved in the stream). Only done if the
+// seekable cache is active (i.e. typically network streams).
+static bool stream_cached_anyway(struct demux_internal *in,
+                                 struct demux_stream *ds)
+{
+    if (!in->seekable_cache)
+        return false;
+    struct demux_opts *opts = in->d_user->opts;
+    return ds->type == STREAM_SUB && opts->cache_unselected_subs;
+}
+
 static void update_stream_selection_state(struct demux_internal *in,
                                           struct demux_stream *ds)
 {
@@ -923,7 +944,7 @@ static void update_stream_selection_state(struct demux_internal *in,
     for (int n = 0; n < in->num_ranges; n++) {
         struct demux_cached_range *range = in->ranges[n];
 
-        if (!ds->selected)
+        if (!ds->selected && !stream_cached_anyway(in, ds))
             clear_queue(range->streams[ds->index]);
 
         update_seek_ranges(range);
@@ -945,6 +966,12 @@ void demux_set_ts_offset(struct demuxer *demuxer, double offset)
 static void add_missing_streams(struct demux_internal *in,
                                 struct demux_cached_range *range)
 {
+    // If the range already has packets, queues added now (stream appeared
+    // mid-demuxing) are missing everything demuxed so far.
+    bool range_has_packets = false;
+    for (int n = 0; n < range->num_streams; n++)
+        range_has_packets |= !!range->streams[n]->head;
+
     for (int n = range->num_streams; n < in->num_streams; n++) {
         struct demux_stream *ds = in->streams[n]->ds;
 
@@ -954,6 +981,7 @@ static void add_missing_streams(struct demux_internal *in,
             .range = range,
         };
         clear_queue(queue);
+        queue->incomplete = range_has_packets;
         MP_TARRAY_APPEND(range, range->streams, range->num_streams, queue);
         mp_assert(range->streams[ds->index] == queue);
     }
@@ -1876,7 +1904,8 @@ static void attempt_range_joining(struct demux_internal *in)
         free_index(q2);
 
         // For moving demuxer position.
-        ds->refreshing = ds->selected;
+        ds->refreshing = ds->selected ||
+            (stream_cached_anyway(in, ds) && ds->queue->head);
     }
 
     for (int n = 0; n < next->num_metadata; n++) {
@@ -2111,7 +2140,8 @@ static void add_packet_locked(struct sh_stream *stream, demux_packet_t *dp)
 
     struct demux_queue *queue = ds->queue;
 
-    bool drop = !ds->selected || in->seeking || ds->sh->attached_picture;
+    bool drop = !(ds->selected || stream_cached_anyway(in, ds)) ||
+                in->seeking || ds->sh->attached_picture;
 
     if (!drop) {
         // If libavformat splits packets, some packets will have pos unset, so
@@ -2142,7 +2172,11 @@ static void add_packet_locked(struct sh_stream *stream, demux_packet_t *dp)
         return;
     }
 
-    record_packet(in, dp);
+    // Streams whose packets are cached even while deselected must not reach
+    // the recorder: it has sinks only for selected streams, and would treat
+    // the packet as a new stream and stop recording.
+    if (ds->selected)
+        record_packet(in, dp);
 
     if (in->cache && in->d_user->opts->disk_cache && !dp->is_wrapped_avframe) {
         int64_t pos = demux_cache_write(in->cache, dp);
@@ -2162,7 +2196,9 @@ static void add_packet_locked(struct sh_stream *stream, demux_packet_t *dp)
 
     // (keep in mind that even if the reader went out of data, the queue is not
     // necessarily empty due to the backbuffer)
-    if (!ds->reader_head && (!ds->skip_to_keyframe || dp->keyframe)) {
+    if (ds->selected && !ds->reader_head &&
+        (!ds->skip_to_keyframe || dp->keyframe))
+    {
         ds->reader_head = dp;
         ds->skip_to_keyframe = false;
     }
@@ -2278,7 +2314,9 @@ static bool read_packet(struct demux_internal *in)
         } else {
             if (lazy_stream_needs_wait(ds)) {
                 read_more = true;
-            } else {
+            } else if (ds->selected) {
+                // (Marking deselected cached-anyway streams would uselessly
+                // toggle their EOF state on every added packet.)
                 mark_stream_eof(ds); // let playback continue
             }
         }
@@ -2347,7 +2385,8 @@ static bool read_packet(struct demux_internal *in)
         for (int n = 0; n < in->num_streams; n++) {
             struct demux_stream *ds = in->streams[n]->ds;
             in->current_range->streams[n]->is_bof =
-                ds->selected && !ds->refreshing;
+                (ds->selected || stream_cached_anyway(in, ds)) &&
+                !ds->refreshing;
         }
     }
 
@@ -3846,7 +3885,10 @@ static void execute_cache_seek(struct demux_internal *in,
         struct demux_stream *ds = in->streams[n]->ds;
         struct demux_queue *queue = range->streams[n];
 
-        struct demux_packet *target = find_seek_target(queue, pts, flags);
+        // Deselected (cached-anyway) streams have no reader; a stuck
+        // reader_head would count as forward-buffered bytes forever.
+        struct demux_packet *target =
+            ds->selected ? find_seek_target(queue, pts, flags) : NULL;
         ds->reader_head = target;
         ds->skip_to_keyframe = !target;
         if (ds->reader_head)
@@ -3878,7 +3920,8 @@ static void execute_cache_seek(struct demux_internal *in,
         for (int n = 0; n < in->num_streams; n++) {
             struct demux_stream *ds = in->streams[n]->ds;
 
-            ds->refreshing = ds->selected;
+            ds->refreshing = ds->selected ||
+                (stream_cached_anyway(in, ds) && ds->queue->head);
         }
 
         MP_VERBOSE(in, "resuming demuxer to end of cached range\n");
@@ -4048,6 +4091,17 @@ static void initiate_refresh_seek(struct demux_internal *in,
         for (int n = 0; n < in->num_streams; n++) {
             struct demux_stream *ds = in->streams[n]->ds;
 
+            // Deselected streams cached anyway keep their queue; the
+            // refreshing logic drops the re-read duplicates, so the queue
+            // stays consistent and covers the whole range.
+            if (!ds->selected && stream_cached_anyway(in, ds) &&
+                ds->queue->head &&
+                (ds->queue->correct_dts || ds->queue->correct_pos))
+            {
+                ds->refreshing = true;
+                continue;
+            }
+
             bool correct_pos = ds->queue->correct_pos;
             bool correct_dts = ds->queue->correct_dts;
 
@@ -4092,6 +4146,35 @@ static void refresh_track(struct demux_internal *in, struct sh_stream *stream,
 
     if (in->back_demuxing)
         ds->back_seek_pos = ref_pts;
+
+    // If the stream's packets were cached even while it was deselected, the
+    // queue covers the current range, and no refresh seek (which would drop
+    // the forward cache) is needed: just start the reader inside the cached
+    // queue.
+    if (stream_cached_anyway(in, ds) && !in->seeking && !in->back_demuxing) {
+        struct demux_packet *target = NULL;
+        bool ok = false;
+        if (ds->type == STREAM_SUB) {
+            // Sub events overlapping the current position may have started
+            // far in the past; deliver the whole cached queue (sub decoders
+            // filter by timestamp) so none of them are missed. An empty
+            // queue is fine if it is complete: the range simply contains no
+            // sub packets so far, and new ones attach to the reader.
+            target = ds->queue->head;
+            ok = target || !ds->queue->incomplete;
+        }
+        if (ok) {
+            MP_VERBOSE(in, "refresh track %d (%s) from cached packets\n",
+                       stream->index, stream_type_name(ds->type));
+            ds->reader_head = target;
+            ds->skip_to_keyframe = !target;
+            if (target)
+                ds->base_ts = MP_PTS_OR_DEF(target->pts, target->dts);
+            wakeup_ds(ds);
+            return;
+        }
+    }
+
     // Avoid refresh seek for video streams except when immediately after a seek
     // to ensure a correct seek position.
     bool avoid_refresh = false;
@@ -4176,16 +4259,18 @@ void demuxer_refresh_track(struct demuxer *demuxer, struct sh_stream *stream,
 }
 
 // This is for demuxer implementations only. demuxer_select_track() sets the
-// logical state, while this function returns the actual state (in case the
-// demuxer attempts to cache even unselected packets for track switching - this
-// will potentially be done in the future).
+// logical state, while this function returns the actual state: it is also
+// true for deselected streams whose packets are cached anyway for fast track
+// switching (see --demuxer-cache-unselected-subs), so that the demuxer keeps
+// producing packets for them.
 bool demux_stream_is_selected(struct sh_stream *stream)
 {
     if (!stream)
         return false;
     bool r = false;
     mp_mutex_lock(&stream->ds->in->lock);
-    r = stream->ds->selected;
+    r = stream->ds->selected ||
+        stream_cached_anyway(stream->ds->in, stream->ds);
     mp_mutex_unlock(&stream->ds->in->lock);
     return r;
 }
@@ -4389,7 +4474,9 @@ static void dump_cache(struct demux_internal *in, double start, double end)
             struct demux_queue *q = r->streams[i];
             struct demux_stream *ds = q->ds;
 
-            ds->dump_pos = find_seek_target(q, pts, flags);
+            // Deselected streams may have cached packets, but the recorder
+            // has no sinks for them.
+            ds->dump_pos = ds->selected ? find_seek_target(q, pts, flags) : NULL;
         }
 
         // We need to reinterleave the separate streams somehow, which makes
