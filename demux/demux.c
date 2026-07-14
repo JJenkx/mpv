@@ -115,6 +115,7 @@ const struct m_sub_options demux_conf = {
         {"demuxer-seekable-cache", OPT_CHOICE(seekable_cache,
             {"auto", -1}, {"no", 0}, {"yes", 1})},
         {"demuxer-cache-unselected-subs", OPT_BOOL(cache_unselected_subs)},
+        {"demuxer-cache-unselected-audio", OPT_BOOL(cache_unselected_audio)},
         {"index", OPT_CHOICE(index_mode, {"default", 1}, {"recreate", 0})},
         {"mf-fps", OPT_DOUBLE(mf_fps)},
         {"mf-type", OPT_STRING(mf_type)},
@@ -146,6 +147,7 @@ const struct m_sub_options demux_conf = {
         .min_secs_cache = 1000.0 * 60 * 60,
         .seekable_cache = -1,
         .cache_unselected_subs = true,
+        .cache_unselected_audio = true,
         .index_mode = 1,
         .mf_fps = 1.0,
         .access_references = true,
@@ -896,7 +898,8 @@ static bool stream_cached_anyway(struct demux_internal *in,
     if (!in->seekable_cache)
         return false;
     struct demux_opts *opts = in->d_user->opts;
-    return ds->type == STREAM_SUB && opts->cache_unselected_subs;
+    return (ds->type == STREAM_SUB && opts->cache_unselected_subs) ||
+           (ds->type == STREAM_AUDIO && opts->cache_unselected_audio);
 }
 
 static void update_stream_selection_state(struct demux_internal *in,
@@ -1844,6 +1847,17 @@ static void attempt_range_joining(struct demux_internal *in)
         if (ds->eager && !join_point_found) {
             MP_WARN(in, "stream %d: no join point found\n", n);
             goto failed;
+        }
+
+        // A deselected cached-anyway audio queue without a join point would
+        // end up with a gap or overlap; drop its data instead (selecting the
+        // track then falls back to a normal refresh seek).
+        if (!ds->eager && !join_point_found && ds->type == STREAM_AUDIO &&
+            stream_cached_anyway(in, ds) && (q1->head || q2->head))
+        {
+            MP_VERBOSE(in, "stream %d: dropping cached audio at join\n", n);
+            clear_queue(q1);
+            clear_queue(q2);
         }
     }
 
@@ -4162,6 +4176,11 @@ static void refresh_track(struct demux_internal *in, struct sh_stream *stream,
             // sub packets so far, and new ones attach to the reader.
             target = ds->queue->head;
             ok = target || !ds->queue->incomplete;
+        } else if (ref_pts != MP_NOPTS_VALUE) {
+            // Start audio at the current position; delivering older packets
+            // would make the decoder burst through them.
+            target = find_seek_target(ds->queue, ref_pts, SEEK_HR);
+            ok = !!target;
         }
         if (ok) {
             MP_VERBOSE(in, "refresh track %d (%s) from cached packets\n",
@@ -4261,8 +4280,8 @@ void demuxer_refresh_track(struct demuxer *demuxer, struct sh_stream *stream,
 // This is for demuxer implementations only. demuxer_select_track() sets the
 // logical state, while this function returns the actual state: it is also
 // true for deselected streams whose packets are cached anyway for fast track
-// switching (see --demuxer-cache-unselected-subs), so that the demuxer keeps
-// producing packets for them.
+// switching (see --demuxer-cache-unselected-subs/-audio), so that the demuxer
+// keeps producing packets for them.
 bool demux_stream_is_selected(struct sh_stream *stream)
 {
     if (!stream)

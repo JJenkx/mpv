@@ -4283,6 +4283,15 @@ Demuxer
     keeps the cache intact. Subtitle packets are small, so the additional
     memory use is negligible.
 
+``--demuxer-cache-unselected-audio=<yes|no>``
+    Like ``--demuxer-cache-unselected-subs``, but for audio tracks (default:
+    yes): switching audio tracks on a network stream keeps the demuxer cache
+    intact instead of re-downloading the readahead. The audio data of all
+    tracks is downloaded anyway (it is interleaved in the stream); this
+    merely keeps it in memory. Note that this increases demuxer cache memory
+    use by the size of all non-selected audio tracks in the cached window,
+    which counts against ``--demuxer-max-bytes`` and
+    ``--demuxer-max-back-bytes``.
 
 ``--demuxer-thread=<yes|no>``
     Run the demuxer in a separate thread, and let it prefetch a certain amount

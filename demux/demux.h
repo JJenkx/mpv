@@ -77,6 +77,7 @@ struct demux_opts {
     bool access_references;
     int seekable_cache;
     bool cache_unselected_subs;
+    bool cache_unselected_audio;
     int index_mode;
     double mf_fps;
     char *mf_type;
