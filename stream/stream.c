@@ -49,6 +49,7 @@ extern const stream_info_t stream_info_null;
 extern const stream_info_t stream_info_memory;
 extern const stream_info_t stream_info_mf;
 extern const stream_info_t stream_info_ffmpeg;
+extern const stream_info_t stream_info_segmented_http;
 extern const stream_info_t stream_info_ffmpeg_unsafe;
 extern const stream_info_t stream_info_avdevice;
 extern const stream_info_t stream_info_file;
@@ -91,6 +92,7 @@ static const stream_info_t *const stream_list[] = {
     &stream_info_file,
     &stream_info_slice,
     &stream_info_fd,
+    &stream_info_segmented_http,
     &stream_info_cb,
 #if HAVE_LIBCURL
     &stream_info_curl,

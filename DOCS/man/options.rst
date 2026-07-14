@@ -5682,6 +5682,35 @@ Network
     are not used for https URLs. Setting this option does not try to make the
     ytdl script use the proxy.
 
+``--segmented-chunks=<0-16>``
+    Download http/https streams with this many parallel HTTP Range
+    connections (default: 0, meaning disabled; 1 also disables it). Each
+    connection fetches one fixed-size chunk ahead of the playback position,
+    and the chunks are stitched into one seamless, fully seekable byte
+    stream. This can massively improve throughput on connections where a
+    single HTTP stream does not saturate the available bandwidth.
+
+    This applies only to plain http/https resources whose server supports
+    byte ranges and reports the file size. If the server lacks range
+    support, the size is unknown, or the stream is a live/HLS stream, mpv
+    transparently falls back to normal single-connection streaming. Seeks
+    within the downloaded window are served from memory; seeks outside it
+    re-anchor the window at the new position, keeping any already
+    downloaded chunks that still fall inside it.
+
+    If the total window (chunks times ``--segment-size``) exceeds
+    ``--demuxer-max-bytes``, the latter is raised to fit (a message is
+    logged).
+
+``--segment-size=<size>``
+    Chunk size for ``--segmented-chunks`` (default: 10MiB). Sizes can use
+    suffixes such as ``KiB``, ``MiB`` and ``GiB``.
+
+``--segment-auto-size=<yes|no>``
+    Grow the segment size toward ``--demuxer-max-bytes`` if it leaves
+    headroom (default: yes). The size is capped at 4 times the requested
+    ``--segment-size`` and at a 1 GiB total window.
+
 ``--tls-ca-file=<filename>``
     Certificate authority database file for use with TLS. (Silently fails with
     older FFmpeg versions.)

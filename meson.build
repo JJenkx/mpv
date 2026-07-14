@@ -195,6 +195,7 @@ sources = files(
     'stream/stream_edl.c',
     'stream/stream_file.c',
     'stream/stream_lavf.c',
+    'stream/stream_segmented_http.c',
     'stream/stream_memory.c',
     'stream/stream_mf.c',
     'stream/stream_mpv.c',

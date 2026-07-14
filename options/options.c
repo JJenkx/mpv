@@ -63,6 +63,7 @@ extern const struct m_sub_options stream_cdda_conf;
 extern const struct m_sub_options stream_dvb_conf;
 extern const struct m_sub_options mp_network_conf;
 extern const struct m_sub_options stream_lavf_conf;
+extern const struct m_sub_options stream_segmented_http_conf;
 extern const struct m_sub_options sws_conf;
 extern const struct m_sub_options zimg_conf;
 extern const struct m_sub_options drm_conf;
@@ -676,6 +677,7 @@ static const m_option_t mp_opts[] = {
 #endif
     {"", OPT_SUBSTRUCT(network_opts, mp_network_conf)},
     {"", OPT_SUBSTRUCT(stream_lavf_opts, stream_lavf_conf)},
+    {"", OPT_SUBSTRUCT(stream_segmented_http_opts, stream_segmented_http_conf)},
 
 // ------------------------- a-v sync options --------------------
 
