@@ -102,6 +102,7 @@ struct worker {
     AVIOContext *avio;
     int64_t avio_pos;   // stream offset the connection is positioned at
     struct slot *active;
+    uint64_t dl_total;  // monotonic bytes this connection has downloaded
 };
 
 struct priv {
@@ -120,6 +121,13 @@ struct priv {
     int num_workers;          // threads spawned (== num_slots)
     int64_t read_pos;         // next byte the reader wants
     bool shutdown;
+
+    // download-speed sampling (see STREAM_CTRL_GET_SEGMENTED_SPEED); the EMA is
+    // rolled on query, driven by the demuxer's ~1s update_cache() tick.
+    int64_t speed_last_ns;
+    int64_t last_dl_ns;       // last time any worker actually received bytes
+    uint64_t worker_prev_total[MAX_WORKERS];
+    double worker_bps[MAX_WORKERS];
 };
 
 static void schedule_slots(struct priv *p);
@@ -262,6 +270,8 @@ static MP_THREAD_VOID worker_thread(void *arg)
                     goto next;
                 }
                 sl->filled = got;
+                w->dl_total += r;   // per-connection throughput accounting
+                p->last_dl_ns = mp_time_ns();
                 mp_cond_broadcast(&p->wakeup);
                 mp_mutex_unlock(&p->lock);
             }
@@ -512,6 +522,55 @@ static int64_t seg_get_size(stream_t *s)
     return p->file_size;
 }
 
+static int seg_control(stream_t *s, int cmd, void *arg)
+{
+    struct priv *p = s->priv;
+    switch (cmd) {
+    case STREAM_CTRL_GET_SEGMENTED_SPEED: {
+        // Report the true combined + per-connection download rate. This is the
+        // sum of what the N worker sockets actually pull off the network, which
+        // diverges from mpv's demuxer raw-input-rate: that measures the reader
+        // draining already-downloaded slot buffers (a memcpy), not network I/O.
+        struct stream_segmented_speed *out = arg;
+        mp_mutex_lock(&p->lock);
+        int64_t now = mp_time_ns();
+        int64_t dt = now - p->speed_last_ns;
+        // Hard-zero once the workers have gone idle (window full, or the whole
+        // file downloaded): without this the last EMA sample would linger on
+        // screen because nothing re-queries us once caching stops.
+        if (p->last_dl_ns && (now - p->last_dl_ns) > MP_TIME_MS_TO_NS(1500)) {
+            for (int n = 0; n < p->num_slots; n++) {
+                p->worker_bps[n] = 0;
+                p->worker_prev_total[n] = p->workers[n].dl_total;
+            }
+            p->speed_last_ns = now;
+        } else if (!p->speed_last_ns || dt >= MP_TIME_S_TO_NS(1)) {
+            double secs = p->speed_last_ns
+                ? dt / (double)MP_TIME_S_TO_NS(1) : 1.0;
+            for (int n = 0; n < p->num_slots; n++) {
+                uint64_t cur = p->workers[n].dl_total;
+                uint64_t delta = cur - p->worker_prev_total[n];
+                p->worker_prev_total[n] = cur;
+                double inst = delta / secs;
+                // 50/50 EMA, matching demux.c's bytes_per_second smoothing
+                p->worker_bps[n] = 0.5 * p->worker_bps[n] + 0.5 * inst;
+            }
+            p->speed_last_ns = now;
+        }
+        uint64_t total = 0;
+        for (int n = 0; n < p->num_workers; n++) {
+            out->worker_bps[n] = (uint64_t)p->worker_bps[n];
+            total += (uint64_t)p->worker_bps[n];
+        }
+        out->num_workers = p->num_workers;
+        out->total_bps = total;
+        mp_mutex_unlock(&p->lock);
+        return STREAM_OK;
+    }
+    }
+    return STREAM_UNSUPPORTED;
+}
+
 static void seg_close(stream_t *s)
 {
     struct priv *p = s->priv;
@@ -676,6 +735,7 @@ static int seg_open(stream_t *stream)
     stream->seek = seg_seek;
     stream->seekable = true;
     stream->get_size = seg_get_size;
+    stream->control = seg_control;
     stream->close = seg_close;
     stream->streaming = true;
     stream->is_network = true;

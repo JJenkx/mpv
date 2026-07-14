@@ -1597,6 +1597,26 @@ static int mp_property_demuxer_cache_state(void *ctx, struct m_property *prop,
         node_map_add_int64(r, "file-cache-bytes", s.file_cache_bytes);
     if (s.bytes_per_second > 0)
         node_map_add_int64(r, "raw-input-rate", s.bytes_per_second);
+    if (s.segmented_active) {
+        node_map_add_int64(r, "segmented-input-rate", s.segmented_total_bps);
+        struct mpv_node *sws =
+            node_map_add(r, "segmented-worker-rates", MPV_FORMAT_NODE_ARRAY);
+        for (int sn = 0; sn < s.segmented_num_workers; sn++)
+            node_array_add(sws, MPV_FORMAT_INT64)->u.int64 = s.segmented_worker_bps[sn];
+    }
+    if (mpctx->open_res_demuxer && atomic_load(&mpctx->open_done) &&
+        mpctx->open_res_demuxer != mpctx->demuxer)
+    {
+        struct demux_reader_state ps;
+        demux_get_reader_state(mpctx->open_res_demuxer, &ps);
+        if (ps.segmented_active) {
+            node_map_add_int64(r, "segmented-prefetch-input-rate", ps.segmented_total_bps);
+            struct mpv_node *pws =
+                node_map_add(r, "segmented-prefetch-worker-rates", MPV_FORMAT_NODE_ARRAY);
+            for (int sn = 0; sn < ps.segmented_num_workers; sn++)
+                node_array_add(pws, MPV_FORMAT_INT64)->u.int64 = ps.segmented_worker_bps[sn];
+        }
+    }
     if (s.seeking != MP_NOPTS_VALUE)
         node_map_add_double(r, "debug-seeking", s.seeking);
     node_map_add_int64(r, "debug-low-level-seeks", s.low_level_seeks);

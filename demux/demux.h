@@ -55,6 +55,13 @@ struct demux_reader_state {
     uint64_t byte_level_seeks; // number of byte stream level seeks
     double ts_last; // approx. timestamp of demuxer position
     uint64_t bytes_per_second; // low level statistics
+    // segmented_http downloader: true network download rate (see
+    // STREAM_CTRL_GET_SEGMENTED_SPEED). Distinct from bytes_per_second, which
+    // for that stream measures the reader draining prefetched slot buffers.
+    bool segmented_active;
+    uint64_t segmented_total_bps;
+    int segmented_num_workers;
+    uint64_t segmented_worker_bps[16];
     // Positions that can be seeked to without incurring the latency of a low
     // level seek.
     int num_seek_ranges;

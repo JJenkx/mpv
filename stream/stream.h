@@ -72,6 +72,7 @@
 enum stream_ctrl {
     // Certain network protocols
     STREAM_CTRL_AVSEEK,
+    STREAM_CTRL_GET_SEGMENTED_SPEED,
     STREAM_CTRL_HAS_AVSEEK,
     STREAM_CTRL_GET_METADATA,
 
@@ -115,6 +116,12 @@ struct stream_avseek {
 
 struct stream;
 struct stream_open_args;
+// for STREAM_CTRL_GET_SEGMENTED_SPEED (segmented_http downloader)
+struct stream_segmented_speed {
+    int num_workers;
+    uint64_t total_bps;         // combined download rate of all connections
+    uint64_t worker_bps[16];    // per-connection rate (MAX_WORKERS)
+};
 typedef struct stream_info_st {
     const char *name;
     // opts is set from ->opts

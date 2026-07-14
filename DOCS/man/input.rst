@@ -2617,6 +2617,21 @@ Property list
     other byte-oriented input layer) in bytes per second. May be inaccurate or
     missing.
 
+    ``segmented-input-rate`` is the combined true network download rate of the
+    segmented HTTP downloader in bytes per second (see ``--segmented-chunks``).
+    Only present when the current stream uses the segmented downloader. Unlike
+    ``raw-input-rate`` (which measures the demuxer draining already-downloaded
+    buffers), this measures what the worker connections actually pull off the
+    network.
+
+    ``segmented-worker-rates`` is an array of per-connection download rates in
+    bytes per second, in the same conditions as ``segmented-input-rate``.
+
+    ``segmented-prefetch-input-rate`` and ``segmented-prefetch-worker-rates``
+    are the same values for the next playlist entry while it is being
+    prefetched over the segmented downloader (see ``--prefetch-playlist``),
+    if any.
+
     ``ts-per-stream`` is an array containing an entry for each stream type: video,
     audio, and subtitle. For each stream type, the details for the demuxer cache
     for that stream type are available as ``cache-duration``, ``reader-pts`` and

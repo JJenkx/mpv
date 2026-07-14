@@ -278,6 +278,10 @@ struct demux_internal {
     int64_t last_speed_query;
     double speed_query_prev_sample;
     uint64_t bytes_per_second;
+    bool segmented_active;
+    uint64_t segmented_total_bps;
+    int segmented_num_workers;
+    uint64_t segmented_worker_bps[16];
     int64_t next_cache_update;
 
     // demux user state (user thread, somewhat similar to reader/decoder state)
@@ -4409,15 +4413,23 @@ static void update_cache(struct demux_internal *in)
 
     int64_t stream_size = -1;
     struct mp_tags *stream_metadata = NULL;
+    struct stream_segmented_speed seg_speed = {0};
+    bool seg_speed_ok = false;
     if (stream) {
         if (do_update)
             stream_size = stream_get_size(stream);
         stream_control(stream, STREAM_CTRL_GET_METADATA, &stream_metadata);
+        seg_speed_ok = stream_control(stream, STREAM_CTRL_GET_SEGMENTED_SPEED, &seg_speed) == STREAM_OK;
     }
 
     mp_mutex_lock(&in->lock);
 
     update_bytes_read(in);
+    in->segmented_active = seg_speed_ok;
+    in->segmented_total_bps = seg_speed_ok ? seg_speed.total_bps : 0;
+    in->segmented_num_workers = seg_speed_ok ? seg_speed.num_workers : 0;
+    for (int sn = 0; sn < in->segmented_num_workers && sn < 16; sn++)
+        in->segmented_worker_bps[sn] = seg_speed.worker_bps[sn];
 
     if (do_update)
         in->stream_size = stream_size;
@@ -4762,10 +4774,25 @@ void demux_get_reader_state(struct demuxer *demuxer, struct demux_reader_state *
         .low_level_seeks = in->low_level_seeks,
         .ts_last = in->demux_ts,
         .bytes_per_second = in->bytes_per_second,
+        .segmented_active = in->segmented_active,
+        .segmented_total_bps = in->segmented_total_bps,
+        .segmented_num_workers = in->segmented_num_workers,
         .byte_level_seeks = in->byte_level_seeks,
         .file_cache_bytes = in->cache ? demux_cache_get_size(in->cache) : -1,
     };
     bool any_packets = false;
+    for (int sn = 0; sn < r->segmented_num_workers && sn < 16; sn++)
+        r->segmented_worker_bps[sn] = in->segmented_worker_bps[sn];
+    if (in->segmented_active && in->d_thread && in->d_thread->stream) {
+        struct stream_segmented_speed seg_live = {0};
+        if (stream_control(in->d_thread->stream,
+                           STREAM_CTRL_GET_SEGMENTED_SPEED, &seg_live) == STREAM_OK) {
+            r->segmented_total_bps = seg_live.total_bps;
+            r->segmented_num_workers = seg_live.num_workers;
+            for (int sn = 0; sn < seg_live.num_workers && sn < 16; sn++)
+                r->segmented_worker_bps[sn] = seg_live.worker_bps[sn];
+        }
+    }
     for (int n = 0; n < STREAM_TYPE_COUNT; n++) {
         r->ts_per_stream[n] = r->ts_info;
     }
