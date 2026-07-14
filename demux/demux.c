@@ -4333,6 +4333,68 @@ void demuxer_refresh_track(struct demuxer *demuxer, struct sh_stream *stream,
     mp_mutex_unlock(&in->lock);
 }
 
+// Extract already-buffered video packets around 'pts' for out-of-band
+// decoding (seekbar thumbnails): the keyframe packet at or before 'pts', as
+// deep copies owned by the caller (free each with free_demux_packet(), the
+// array with talloc_free()). Strictly read-only with respect to the demuxer:
+// no reader_head is moved and no low-level/network seek is issued. Returns
+// false when 'pts' is not inside a cached range - the frame simply is not
+// buffered.
+bool demux_get_cached_video_packets(struct demuxer *demuxer, int stream_index,
+                                    double pts, struct demux_packet ***out_pkts,
+                                    int *out_num)
+{
+    struct demux_internal *in = demuxer->in;
+
+    *out_pkts = NULL;
+    *out_num = 0;
+
+    struct demux_packet **arr = NULL;
+    int num = 0;
+    bool ok = false;
+
+    mp_mutex_lock(&in->lock);
+
+    if (!in->seekable_cache)
+        goto done;
+    if (stream_index < 0 || stream_index >= in->num_streams)
+        goto done;
+
+    // Find a cached range that actually contains the requested time. If none
+    // does, the frame simply isn't buffered -> no thumbnail, no network I/O.
+    struct demux_cached_range *range = find_cache_seek_range(in, pts, 0);
+    if (!range || stream_index >= range->num_streams)
+        goto done;
+
+    struct demux_queue *queue = range->streams[stream_index];
+    if (!queue)
+        goto done;
+
+    // Keyframe at or before the requested time (SEEK backward, flags == 0).
+    // Deliberately return only this keyframe: decoding it alone yields the
+    // frame a keyframe seek would land on. This makes the thumbnail
+    // deterministic for a given time (no per-frame jitter as the hover time
+    // wobbles, and no frame-walk as the GOP fills in during buffering).
+    // find_cache_seek_range() already guarantees the time is within the
+    // range's seek_end, so this is the correct GOP keyframe, not an
+    // undershoot into unbuffered data.
+    struct demux_packet *target = find_seek_target(queue, pts, 0);
+    if (!target || target->is_cached)
+        goto done;
+
+    struct demux_packet *cl = demux_copy_packet(in->packet_pool, target);
+    if (!cl)
+        goto done;
+    MP_TARRAY_APPEND(NULL, arr, num, cl);
+    ok = true;
+
+done:
+    mp_mutex_unlock(&in->lock);
+    *out_pkts = arr;
+    *out_num = num;
+    return ok;
+}
+
 // This is for demuxer implementations only. demuxer_select_track() sets the
 // logical state, while this function returns the actual state: it is also
 // true for deselected streams whose packets are cached anyway for fast track

@@ -317,6 +317,11 @@ struct demux_packet *demux_read_any_packet(struct demuxer *demuxer);
 
 struct sh_stream *demux_get_stream(struct demuxer *demuxer, int index);
 int demux_get_num_stream(struct demuxer *demuxer);
+// Read-only extraction of already-buffered video packets (seekbar thumbnails).
+bool demux_get_cached_video_packets(struct demuxer *demuxer,
+                                    int stream_index, double pts,
+                                    struct demux_packet ***out_pkts,
+                                    int *out_num);
 
 struct sh_stream *demux_alloc_sh_stream(enum stream_type type);
 void demux_add_sh_stream(struct demuxer *demuxer, struct sh_stream *sh);

@@ -445,6 +445,7 @@ typedef struct MPContext {
     bool drop_message_shown;
 
     struct screenshot_ctx *screenshot_ctx;
+    struct thumbnail_ctx *thumbnail_ctx; // "thumbnail-cache" command state
     struct command_ctx *command_ctx;
     struct encode_lavc_context *encode_lavc_ctx;
 

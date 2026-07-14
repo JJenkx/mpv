@@ -1507,6 +1507,28 @@ Screenshot Commands
         MPV_FORMAT_NODE_MAP
             "filename"    MPV_FORMAT_STRING
 
+``thumbnail-cache <time> <width> <height> <filename>``
+    Decode the video keyframe at or before ``<time>`` on a worker thread,
+    scale it to exactly ``<width>x<height>`` BGRA, and write the raw pixels
+    (tightly packed, ``width*height*4`` bytes) to ``<filename>`` atomically
+    (temp file + rename). Intended for seekbar thumbnail scripts; the output
+    matches what ``overlay-add`` consumes.
+
+    For network or non-seekable sources, the frame is decoded straight out of
+    the already-buffered demuxer cache: no extra network I/O is performed and
+    playback is not disturbed, but only buffered positions can be
+    thumbnailed. For local seekable files, the file is opened directly (a
+    private context, kept open and reused across calls) and any position
+    works.
+
+    The command is keyframe-accurate on purpose: it returns the frame a
+    keyframe seek would land on, which makes the thumbnail deterministic for
+    a given time. Granularity is therefore the keyframe interval.
+
+    The command succeeds only if a file was written. If ``<time>`` is not
+    buffered (network case), nothing is written and the command fails; the
+    caller should keep the previous thumbnail.
+
 ``screenshot-to-file <filename> [<flags>]``
     Take a screenshot and save it to a given file. The format of the file will
     be guessed by the extension (and ``--screenshot-format`` is ignored - the

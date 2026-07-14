@@ -177,6 +177,7 @@ sources = files(
     'player/osd.c',
     'player/playloop.c',
     'player/screenshot.c',
+    'player/thumbnail.c',
     'player/scripting.c',
     'player/sub.c',
     'player/video.c',
