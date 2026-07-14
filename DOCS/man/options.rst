@@ -4387,6 +4387,29 @@ Demuxer
     can't predict whether you go backwards in the playlist, and assumes you
     won't edit the playlist.
 
+``--next-file-prefetch=<yes|no>``
+    Like ``--prefetch-playlist``, but prefetch the next playlist entry from
+    the moment the current file is playing smoothly, instead of only once
+    the current URL is fully read (default: no). While prefetching, the next
+    entry's demuxer cache is capped at
+    ``--next-file-demuxer-max-bytes-prefetch`` and its back-buffer is
+    disabled, so the prefetch stays cheap; the instant the entry becomes the
+    current file, the caps are lifted to the normal ``--demuxer-max-bytes``
+    values and the already buffered data is reused (no stream reopen).
+
+    The same caveats as with ``--prefetch-playlist`` apply.
+
+``--next-file-demuxer-max-bytes-prefetch=<bytesize>``
+    Demuxer cache cap for an entry being prefetched with
+    ``--next-file-prefetch`` (default: 0, meaning 256 MiB). See
+    ``--list-options`` for valid ranges.
+
+``--next-file-segmented-chunks=<1-16>``
+    Number of parallel connections the segmented HTTP downloader (see
+    ``--segmented-chunks``) uses for an entry that is being prefetched
+    (default: 1). On promotion to the current file, parallelism ramps to the
+    full ``--segmented-chunks`` without discarding buffered data.
+
 ``--force-seekable=<yes|no>``
     If the player thinks that the media is not seekable (e.g. playing from a
     pipe, or it's an http stream with a server that doesn't support range

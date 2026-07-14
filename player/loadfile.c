@@ -1228,6 +1228,11 @@ static MP_THREAD_VOID open_demux_thread(void *ctx)
         .allow_playlist_create = mpctx->playlist->num_entries <= 1 &&
                                  !mpctx->playlist->playlist_dir,
     };
+    if (mpctx->open_for_prefetch) {
+        p.is_prefetch = true;
+        p.prefetch_max_bytes = mpctx->opts->next_file_prefetch_max_bytes;
+        p.stream_flags |= STREAM_PREFETCH;
+    }
     struct demuxer *demux =
         demux_open_url(mpctx->open_url, &p, mpctx->open_cancel, mpctx->global);
     mpctx->open_res_demuxer = demux;
@@ -1357,6 +1362,7 @@ static void open_demux_reentrant(struct MPContext *mpctx)
 
     if (mpctx->open_res_demuxer) {
         mpctx->demuxer = mpctx->open_res_demuxer;
+        demux_end_prefetch(mpctx->demuxer);
         mpctx->open_res_demuxer = NULL;
         mp_cancel_set_parent(mpctx->demuxer->cancel, mpctx->playback_abort);
     } else {
@@ -1369,7 +1375,7 @@ cancel:
 
 void prefetch_next(struct MPContext *mpctx)
 {
-    if (!mpctx->opts->prefetch_open || mpctx->open_active)
+    if ((!mpctx->opts->prefetch_open && !mpctx->opts->next_file_prefetch) || mpctx->open_active)
         return;
 
     struct playlist_entry *new_entry = mp_next_file(mpctx, +1, false, false);

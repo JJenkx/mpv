@@ -10,6 +10,20 @@
  * (N < 2 disables the module; the URL then falls through to the normal
  * stream_lavf single-connection path.)
  *
+ * Next-file prefetch: a stream opened for playlist prefetch (STREAM_PREFETCH
+ * flag, set by the player when --next-file-prefetch is on) starts with only
+ * --next-file-segmented-chunks workers *active* — the readahead window and
+ * buffers are still allocated at the full --segmented-chunks size, but the
+ * extra workers park until the file is promoted to the current playback
+ * entry. On promotion the player sends STREAM_CTRL_SEGMENTED_ACTIVATE and all
+ * workers wake. Workers and the readahead window are separate concepts here:
+ * num_slots is the window (fixed at open); active_workers is download
+ * parallelism (grows on promotion). This lets prefetch buffer the next file
+ * cheaply — one connection, bounded by the demuxer's per-instance prefetch
+ * cache cap — without stealing bandwidth from what is currently playing, then
+ * ramp to full parallelism the instant it becomes the current file, with the
+ * already-buffered data kept (no stream reopen).
+ *
  * Fallback: if the server does not report byte-range/seek support, or
  * the file size is unknown, open() returns STREAM_NO_MATCH so that
  * stream_lavf takes over transparently.
@@ -57,6 +71,7 @@ struct segmented_http_opts {
     int chunks;
     int64_t chunk_size;
     bool auto_size;
+    int prefetch_chunks;
 };
 
 const struct m_sub_options stream_segmented_http_conf = {
@@ -65,6 +80,8 @@ const struct m_sub_options stream_segmented_http_conf = {
         {"segment-size", OPT_BYTE_SIZE(chunk_size),
             M_RANGE(64 * 1024, (int64_t)1 << 30)},
         {"segment-auto-size", OPT_BOOL(auto_size)},
+        {"next-file-segmented-chunks", OPT_INT(prefetch_chunks),
+            M_RANGE(1, MAX_WORKERS)},
         {0}
     },
     .size = sizeof(struct segmented_http_opts),
@@ -72,6 +89,7 @@ const struct m_sub_options stream_segmented_http_conf = {
         .chunks = 0,
         .chunk_size = 10 * 1024 * 1024,
         .auto_size = true,
+        .prefetch_chunks = 1,
     },
 };
 
@@ -119,6 +137,8 @@ struct priv {
     struct slot *slots;
     struct worker *workers;
     int num_workers;          // threads spawned (== num_slots)
+    int active_workers;       // threads permitted to download (<= num_slots);
+                              // < num_slots only while prefetching
     int64_t read_pos;         // next byte the reader wants
     bool shutdown;
 
@@ -223,6 +243,13 @@ static MP_THREAD_VOID worker_thread(void *arg)
 
     mp_mutex_lock(&p->lock);
     while (!p->shutdown) {
+        // Parked while prefetching: this worker's index is beyond the active
+        // set, so it must not open a connection or pull work. It wakes on the
+        // broadcast from STREAM_CTRL_SEGMENTED_ACTIVATE (or shutdown).
+        if (w->index >= p->active_workers) {
+            mp_cond_wait(&p->wakeup, &p->lock);
+            continue;
+        }
         // pick the queued chunk closest to the reader
         struct slot *sl = NULL;
         for (int n = 0; n < p->num_slots; n++) {
@@ -526,6 +553,18 @@ static int seg_control(stream_t *s, int cmd, void *arg)
 {
     struct priv *p = s->priv;
     switch (cmd) {
+    case STREAM_CTRL_SEGMENTED_ACTIVATE:
+        // Promotion from next-file prefetch to the current playback entry:
+        // wake the parked workers so download runs at full parallelism.
+        mp_mutex_lock(&p->lock);
+        if (p->active_workers < p->num_slots) {
+            p->active_workers = p->num_slots;
+            MP_VERBOSE(s, "segmented: activated full parallelism "
+                       "(%d workers) on promotion\n", p->num_slots);
+            mp_cond_broadcast(&p->wakeup);
+        }
+        mp_mutex_unlock(&p->lock);
+        return STREAM_OK;
     case STREAM_CTRL_GET_SEGMENTED_SPEED: {
         // Report the true combined + per-connection download rate. This is the
         // sum of what the N worker sockets actually pull off the network, which
@@ -557,12 +596,17 @@ static int seg_control(stream_t *s, int cmd, void *arg)
             }
             p->speed_last_ns = now;
         }
+        // Report only the workers that are actually permitted to download:
+        // active_workers == num_slots for the current file, but
+        // == --next-file-segmented-chunks while a stream is still
+        // prefetching, so the number of per-thread rates tracks whichever
+        // count is in effect.
         uint64_t total = 0;
-        for (int n = 0; n < p->num_workers; n++) {
+        for (int n = 0; n < p->active_workers; n++) {
             out->worker_bps[n] = (uint64_t)p->worker_bps[n];
             total += (uint64_t)p->worker_bps[n];
         }
-        out->num_workers = p->num_workers;
+        out->num_workers = p->active_workers;
         out->total_bps = total;
         mp_mutex_unlock(&p->lock);
         return STREAM_OK;
@@ -591,6 +635,11 @@ static void seg_close(stream_t *s)
 // Reconcile chunks*size with demuxer-max-bytes as requested:
 //  - grow segment size (bounded) if demuxer-max-bytes leaves headroom
 //  - raise demuxer-max-bytes if the window would exceed it
+// While prefetching we never raise the global demuxer-max-bytes: that write
+// would be seen as a demuxer option change and make the player drop the very
+// prefetch being built. The per-instance prefetch cache cap governs the
+// prefetch volume anyway, and the global limit is restored/authoritative once
+// the file is promoted.
 static void reconcile_demux_buffer(stream_t *s, struct segmented_http_opts *o,
                                    int64_t *chunk_size)
 {
@@ -616,7 +665,7 @@ static void reconcile_demux_buffer(stream_t *s, struct segmented_http_opts *o,
         }
     }
 
-    if (total > dopts->max_bytes) {
+    if (total > dopts->max_bytes && !s->prefetch) {
         MP_INFO(s, "segmented: raising demuxer-max-bytes %"PRId64" -> "
                 "%"PRId64" to fit %d x %"PRId64" window\n",
                 (int64_t)dopts->max_bytes, total, o->chunks, *chunk_size);
@@ -697,10 +746,19 @@ static int seg_open(stream_t *stream)
     while (num_slots > 1 && (int64_t)(num_slots - 1) * chunk_size >= size)
         num_slots--;
 
+    // Download parallelism starts reduced for a next-file prefetch stream and
+    // grows to num_slots on promotion (STREAM_CTRL_SEGMENTED_ACTIVATE); the
+    // window (num_slots) and buffers are always allocated at full size so no
+    // reallocation is ever needed while workers hold slot pointers.
+    int active = num_slots;
+    if (stream->prefetch)
+        active = MPCLAMP(opts->prefetch_chunks, 1, num_slots);
+
     p->url = talloc_strdup(p, url);
     p->num_slots = num_slots;
     p->chunk_size = chunk_size;
     p->file_size = size;
+    p->active_workers = active;
     p->slots = talloc_zero_array(p, struct slot, num_slots);
     for (int n = 0; n < num_slots; n++)
         p->slots[n].buf = talloc_size(p, chunk_size);
@@ -726,10 +784,15 @@ static int seg_open(stream_t *stream)
     }
 
     MP_INFO(stream, "segmented: %d parallel chunks x %"PRId64" bytes "
-            "(window %"PRId64" MiB, file %"PRId64" MiB)\n",
+            "(window %"PRId64" MiB, file %"PRId64" MiB)%s\n",
             num_slots, chunk_size,
             (int64_t)num_slots * chunk_size / (1024 * 1024),
-            size / (1024 * 1024));
+            size / (1024 * 1024),
+            active < num_slots ? " [prefetch: reduced parallelism]" : "");
+    if (active < num_slots) {
+        MP_VERBOSE(stream, "segmented: prefetch mode, %d of %d workers active "
+                   "until promotion\n", active, num_slots);
+    }
 
     stream->fill_buffer = seg_fill_buffer;
     stream->seek = seg_seek;

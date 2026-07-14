@@ -219,6 +219,14 @@ struct demux_internal {
     bool using_network_cache_opts;
     char *record_filename;
 
+    // Next-file prefetch: while set, the demuxer cache is capped at
+    // prefetch_max_bytes and the back-buffer disabled, so prefetching the next
+    // playlist entry stays cheap. Cleared via prefetch_end_pending (handled on
+    // the demux thread) when the entry is promoted to current playback.
+    bool in_prefetch_mode;
+    size_t prefetch_max_bytes;
+    bool prefetch_end_pending;
+
     // Whether the demuxer thread should prefetch packets. This is set to false
     // if EOF was reached or the demuxer cache is full. This is also important
     // in the initial state: the decoder thread needs to select streams before
@@ -2645,6 +2653,12 @@ static void update_opts(struct demuxer *demuxer)
         in->using_network_cache_opts = false;
     }
 
+    if (in->in_prefetch_mode) {
+        if (in->max_bytes > in->prefetch_max_bytes)
+            in->max_bytes = in->prefetch_max_bytes;
+        in->max_bytes_bw = 0;
+    }
+
     if (in->seekable_cache && opts->disk_cache && !in->cache) {
         in->cache = demux_cache_create(in->global, in->log);
         if (!in->cache)
@@ -2677,9 +2691,41 @@ static void update_opts(struct demuxer *demuxer)
 }
 
 // Make demuxing progress. Return whether progress was made.
+// Leave next-file prefetch mode: lift the cache cap and switch the stream to
+// full parallelism. When threaded (the normal prefetch case) the demux thread
+// owns the stream, so we only flag it and wake the thread; it does the work in
+// thread_work(). Idempotent and safe on a demuxer that was never prefetching.
+void demux_end_prefetch(struct demuxer *demuxer)
+{
+    struct demux_internal *in = demuxer->in;
+    mp_mutex_lock(&in->lock);
+    if (in->in_prefetch_mode) {
+        if (in->threading) {
+            in->prefetch_end_pending = true;
+            mp_cond_signal(&in->wakeup);
+        } else {
+            in->in_prefetch_mode = false;
+            update_opts(in->d_user);
+            if (in->d_user->stream)
+                stream_control(in->d_user->stream,
+                               STREAM_CTRL_SEGMENTED_ACTIVATE, NULL);
+        }
+    }
+    mp_mutex_unlock(&in->lock);
+}
+
 static bool thread_work(struct demux_internal *in)
 {
     struct demux_opts *opts = in->d_user->opts;
+    if (in->prefetch_end_pending) {
+        in->prefetch_end_pending = false;
+        in->in_prefetch_mode = false;
+        update_opts(in->d_user);
+        if (in->d_thread->stream)
+            stream_control(in->d_thread->stream,
+                           STREAM_CTRL_SEGMENTED_ACTIVATE, NULL);
+        return true;
+    }
     size_t old_max_bytes = opts->max_bytes;
     size_t old_max_bytes_bw = opts->max_bytes_bw;
     if (m_config_cache_update(in->d_user->opts_cache)) {
@@ -3485,6 +3531,12 @@ static struct demuxer *open_given_type(struct mpv_global *global,
     };
     mp_mutex_init(&in->lock);
     mp_cond_init(&in->wakeup);
+
+    if (params && params->is_prefetch && params->is_top_level) {
+        in->in_prefetch_mode = true;
+        in->prefetch_max_bytes = params->prefetch_max_bytes > 0
+            ? params->prefetch_max_bytes : (256 * 1024 * 1024);
+    }
 
     *in->d_thread = *demuxer;
 

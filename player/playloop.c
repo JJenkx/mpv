@@ -812,7 +812,7 @@ static void handle_update_cache(struct MPContext *mpctx)
         force_update = true;
     }
 
-    if (s.eof && !busy)
+    if ((s.eof && !busy) || (mpctx->opts->next_file_prefetch && !mpctx->paused_for_cache))
         prefetch_next(mpctx);
 
     if (force_update) {

@@ -53,6 +53,7 @@
 #define STREAM_LOCAL_FS_ONLY      (1 << 5) // stream_file only, no URLs
 #define STREAM_LESS_NOISE         (1 << 6) // try to log errors only
 #define STREAM_ALLOW_PARTIAL_READ (1 << 7) // allows partial read with stream_read_file()
+#define STREAM_PREFETCH           (1 << 8) // opened for next-file playlist prefetch
 
 // Default flags used by stream_read_file().
 #define STREAM_READ_FILE_FLAGS_DEFAULT \
@@ -72,6 +73,7 @@
 enum stream_ctrl {
     // Certain network protocols
     STREAM_CTRL_AVSEEK,
+    STREAM_CTRL_SEGMENTED_ACTIVATE,
     STREAM_CTRL_GET_SEGMENTED_SPEED,
     STREAM_CTRL_HAS_AVSEEK,
     STREAM_CTRL_GET_METADATA,
@@ -172,6 +174,7 @@ typedef struct stream {
     bool is_regular : 1; // regular file
     bool access_references : 1; // open other streams
     bool allow_partial_read : 1; // allows partial read with stream_read_file()
+    bool prefetch : 1; // opened for next-file playlist prefetch
     struct mp_log *log;
     struct mpv_global *global;
 

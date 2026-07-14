@@ -226,6 +226,8 @@ struct demuxer_params {
     int stream_flags;
     struct stream *external_stream; // if set, use this, don't open or close streams
     bool allow_playlist_create;
+    bool is_prefetch;            // opened for next-file playlist prefetch
+    int64_t prefetch_max_bytes;  // demuxer cache cap while prefetching (0=default)
     // result
     bool demuxer_failed;
 };
@@ -329,6 +331,7 @@ void demux_start_thread(struct demuxer *demuxer);
 void demux_stop_thread(struct demuxer *demuxer);
 void demux_set_wakeup_cb(struct demuxer *demuxer, void (*cb)(void *ctx), void *ctx);
 void demux_start_prefetch(struct demuxer *demuxer);
+void demux_end_prefetch(struct demuxer *demuxer);
 
 bool demux_cancel_test(struct demuxer *demuxer);
 

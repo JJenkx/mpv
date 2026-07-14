@@ -370,6 +370,7 @@ static int stream_create_instance(const stream_info_t *sinfo,
     s->mode = flags & (STREAM_READ | STREAM_WRITE);
     s->requested_buffer_size = opts->buffer_size;
     s->allow_partial_read = flags & STREAM_ALLOW_PARTIAL_READ;
+    s->prefetch = flags & STREAM_PREFETCH;
 
     if (flags & STREAM_LESS_NOISE)
         mp_msg_set_max_level(s->log, MSGL_WARN);
