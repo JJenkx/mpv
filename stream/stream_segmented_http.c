@@ -6,14 +6,14 @@
  * position, and serves them to the demuxer as one seamless, seekable
  * byte stream.
  *
- * Enabled with:  --segmented-chunks=N --segment-size=SIZE
+ * Enabled with:  --http-segmented-connections=N --http-segmented-chunk-size=SIZE
  * (N < 2 disables the module; the URL then falls through to the normal
  * stream_lavf single-connection path.)
  *
  * Next-file prefetch: a stream opened for playlist prefetch (STREAM_PREFETCH
- * flag, set by the player when --next-file-prefetch is on) starts with only
- * --next-file-segmented-chunks workers *active* — the readahead window and
- * buffers are still allocated at the full --segmented-chunks size, but the
+ * flag, set by the player when --prefetch-playlist=immediate is on) starts with only
+ * --http-segmented-prefetch-connections workers *active* — the readahead window and
+ * buffers are still allocated at the full --http-segmented-connections size, but the
  * extra workers park until the file is promoted to the current playback
  * entry. On promotion the player sends STREAM_CTRL_SEGMENTED_ACTIVATE and all
  * workers wake. Workers and the readahead window are separate concepts here:
@@ -76,11 +76,11 @@ struct segmented_http_opts {
 
 const struct m_sub_options stream_segmented_http_conf = {
     .opts = (const m_option_t[]) {
-        {"segmented-chunks", OPT_INT(chunks), M_RANGE(0, MAX_WORKERS)},
-        {"segment-size", OPT_BYTE_SIZE(chunk_size),
+        {"http-segmented-connections", OPT_INT(chunks), M_RANGE(0, MAX_WORKERS)},
+        {"http-segmented-chunk-size", OPT_BYTE_SIZE(chunk_size),
             M_RANGE(64 * 1024, (int64_t)1 << 30)},
-        {"segment-auto-size", OPT_BOOL(auto_size)},
-        {"next-file-segmented-chunks", OPT_INT(prefetch_chunks),
+        {"http-segmented-auto-size", OPT_BOOL(auto_size)},
+        {"http-segmented-prefetch-connections", OPT_INT(prefetch_chunks),
             M_RANGE(1, MAX_WORKERS)},
         {0}
     },
@@ -598,7 +598,7 @@ static int seg_control(stream_t *s, int cmd, void *arg)
         }
         // Report only the workers that are actually permitted to download:
         // active_workers == num_slots for the current file, but
-        // == --next-file-segmented-chunks while a stream is still
+        // == --http-segmented-prefetch-connections while a stream is still
         // prefetching, so the number of per-thread rates tracks whichever
         // count is in effect.
         uint64_t total = 0;
@@ -657,7 +657,7 @@ static void reconcile_demux_buffer(stream_t *s, struct segmented_http_opts *o,
         int64_t target = MPMIN(dopts->max_bytes / o->chunks, *chunk_size * 4);
         target = MPMIN(target, ((int64_t)1 << 30) / o->chunks);
         if (target > *chunk_size) {
-            MP_VERBOSE(s, "segmented: growing segment-size %"PRId64" -> "
+            MP_VERBOSE(s, "segmented: growing chunk-size %"PRId64" -> "
                        "%"PRId64" to target demuxer-max-bytes (%"PRId64")\n",
                        *chunk_size, target, (int64_t)dopts->max_bytes);
             *chunk_size = target;

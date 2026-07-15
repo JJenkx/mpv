@@ -2640,7 +2640,7 @@ Property list
     missing.
 
     ``segmented-input-rate`` is the combined true network download rate of the
-    segmented HTTP downloader in bytes per second (see ``--segmented-chunks``).
+    segmented HTTP downloader in bytes per second (see ``--http-segmented-connections``).
     Only present when the current stream uses the segmented downloader. Unlike
     ``raw-input-rate`` (which measures the demuxer draining already-downloaded
     buffers), this measures what the worker connections actually pull off the

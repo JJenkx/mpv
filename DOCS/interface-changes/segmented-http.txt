@@ -1,1 +1,1 @@
-add `--segmented-chunks`, `--segment-size`, `--segment-auto-size`
+add `--http-segmented-connections`, `--http-segmented-chunk-size`, `--http-segmented-auto-size`

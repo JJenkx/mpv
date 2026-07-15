@@ -1230,7 +1230,7 @@ static MP_THREAD_VOID open_demux_thread(void *ctx)
     };
     if (mpctx->open_for_prefetch) {
         p.is_prefetch = true;
-        p.prefetch_max_bytes = mpctx->opts->next_file_prefetch_max_bytes;
+        p.prefetch_max_bytes = mpctx->opts->prefetch_demuxer_max_bytes;
         p.stream_flags |= STREAM_PREFETCH;
     }
     struct demuxer *demux =
@@ -1375,7 +1375,7 @@ cancel:
 
 void prefetch_next(struct MPContext *mpctx)
 {
-    if ((!mpctx->opts->prefetch_open && !mpctx->opts->next_file_prefetch) || mpctx->open_active)
+    if (!mpctx->opts->prefetch_open || mpctx->open_active)
         return;
 
     struct playlist_entry *new_entry = mp_next_file(mpctx, +1, false, false);

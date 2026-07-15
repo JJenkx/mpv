@@ -4370,10 +4370,21 @@ Demuxer
 
     The default value is 0, which disables the byte-based caching hysteresis.
 
-``--prefetch-playlist=<yes|no>``
-    Prefetch next playlist entry while playback of the current entry is ending
-    (default: no). This merely opens the URL of the next playlist entry as soon
-    as the current URL is fully read.
+``--prefetch-playlist=<no|eof|immediate>``
+    Prefetch the next playlist entry during playback of the current entry
+    (default: no). ``yes`` is accepted as an alias for ``eof``.
+
+    :no:        Don't prefetch.
+    :eof:       Open the URL of the next playlist entry as soon as the
+                current URL is fully read.
+    :immediate: Open the next entry as soon as the current file is playing
+                smoothly (not stalling for cache). While prefetching, the
+                next entry's demuxer cache is capped at
+                ``--prefetch-demuxer-max-bytes`` and its back-buffer is
+                disabled, so the prefetch stays cheap; the instant the entry
+                becomes the current file, the caps are lifted to the normal
+                ``--demuxer-max-bytes`` values and the already buffered data
+                is reused (no stream reopen).
 
     This does **not** work with URLs resolved by the ``youtube-dl`` wrapper,
     and it won't.
@@ -4387,28 +4398,10 @@ Demuxer
     can't predict whether you go backwards in the playlist, and assumes you
     won't edit the playlist.
 
-``--next-file-prefetch=<yes|no>``
-    Like ``--prefetch-playlist``, but prefetch the next playlist entry from
-    the moment the current file is playing smoothly, instead of only once
-    the current URL is fully read (default: no). While prefetching, the next
-    entry's demuxer cache is capped at
-    ``--next-file-demuxer-max-bytes-prefetch`` and its back-buffer is
-    disabled, so the prefetch stays cheap; the instant the entry becomes the
-    current file, the caps are lifted to the normal ``--demuxer-max-bytes``
-    values and the already buffered data is reused (no stream reopen).
-
-    The same caveats as with ``--prefetch-playlist`` apply.
-
-``--next-file-demuxer-max-bytes-prefetch=<bytesize>``
+``--prefetch-demuxer-max-bytes=<bytesize>``
     Demuxer cache cap for an entry being prefetched with
-    ``--next-file-prefetch`` (default: 0, meaning 256 MiB). See
+    ``--prefetch-playlist=immediate`` (default: 0, meaning 256 MiB). See
     ``--list-options`` for valid ranges.
-
-``--next-file-segmented-chunks=<1-16>``
-    Number of parallel connections the segmented HTTP downloader (see
-    ``--segmented-chunks``) uses for an entry that is being prefetched
-    (default: 1). On promotion to the current file, parallelism ramps to the
-    full ``--segmented-chunks`` without discarding buffered data.
 
 ``--force-seekable=<yes|no>``
     If the player thinks that the media is not seekable (e.g. playing from a
@@ -5705,7 +5698,7 @@ Network
     are not used for https URLs. Setting this option does not try to make the
     ytdl script use the proxy.
 
-``--segmented-chunks=<0-16>``
+``--http-segmented-connections=<0-16>``
     Download http/https streams with this many parallel HTTP Range
     connections (default: 0, meaning disabled; 1 also disables it). Each
     connection fetches one fixed-size chunk ahead of the playback position,
@@ -5721,18 +5714,25 @@ Network
     re-anchor the window at the new position, keeping any already
     downloaded chunks that still fall inside it.
 
-    If the total window (chunks times ``--segment-size``) exceeds
-    ``--demuxer-max-bytes``, the latter is raised to fit (a message is
-    logged).
+    If the total window (connections times ``--http-segmented-chunk-size``)
+    exceeds ``--demuxer-max-bytes``, the latter is raised to fit (a message
+    is logged).
 
-``--segment-size=<size>``
-    Chunk size for ``--segmented-chunks`` (default: 10MiB). Sizes can use
-    suffixes such as ``KiB``, ``MiB`` and ``GiB``.
+``--http-segmented-chunk-size=<size>``
+    Chunk size for ``--http-segmented-connections`` (default: 10MiB). Sizes
+    can use suffixes such as ``KiB``, ``MiB`` and ``GiB``.
 
-``--segment-auto-size=<yes|no>``
-    Grow the segment size toward ``--demuxer-max-bytes`` if it leaves
+``--http-segmented-auto-size=<yes|no>``
+    Grow the chunk size toward ``--demuxer-max-bytes`` if it leaves
     headroom (default: yes). The size is capped at 4 times the requested
-    ``--segment-size`` and at a 1 GiB total window.
+    ``--http-segmented-chunk-size`` and at a 1 GiB total window.
+
+``--http-segmented-prefetch-connections=<1-16>``
+    Number of parallel connections the segmented downloader uses for a
+    playlist entry that is being prefetched with
+    ``--prefetch-playlist=immediate`` (default: 1). On promotion to the
+    current file, parallelism ramps to the full
+    ``--http-segmented-connections`` without discarding buffered data.
 
 ``--tls-ca-file=<filename>``
     Certificate authority database file for use with TLS. (Silently fails with

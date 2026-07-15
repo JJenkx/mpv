@@ -812,7 +812,10 @@ static void handle_update_cache(struct MPContext *mpctx)
         force_update = true;
     }
 
-    if ((s.eof && !busy) || (mpctx->opts->next_file_prefetch && !mpctx->paused_for_cache))
+    // prefetch-playlist=immediate (2): prefetch the next entry as soon as the
+    // current file plays without stalling for cache, not only at cache EOF.
+    if ((s.eof && !busy) ||
+        (mpctx->opts->prefetch_open == 2 && !mpctx->paused_for_cache))
         prefetch_next(mpctx);
 
     if (force_update) {

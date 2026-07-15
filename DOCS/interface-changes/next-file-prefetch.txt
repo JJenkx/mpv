@@ -1,1 +1,2 @@
-add `--next-file-prefetch`, `--next-file-demuxer-max-bytes-prefetch`, `--next-file-segmented-chunks`
+extend `--prefetch-playlist` to `<no|eof|immediate>` (`yes` stays an alias for `eof`)
+add `--prefetch-demuxer-max-bytes`, `--http-segmented-prefetch-connections`
