@@ -53,9 +53,32 @@ static void microsoft_nonsense(void)
                       BASE_SEARCH_PATH_PERMANENT);
 }
 
+// Portable-build RAM fix (Windows analog of the Linux glibc
+// M_TRIM_THRESHOLD trim): periodically decommit freed heap back to the
+// OS so a long playlist holds RSS flat. HeapOptimizeResources touches
+// only FREE blocks, so the in-use working set (and playback) is unaffected.
+static DWORD WINAPI mp_heap_trim_thread(LPVOID param)
+{
+    HEAP_OPTIMIZE_RESOURCES_INFORMATION heap_info = {
+        .Version = HEAP_OPTIMIZE_RESOURCES_CURRENT_VERSION
+    };
+    for (;;) {
+        Sleep(30000); // 30 s
+        HeapSetInformation(NULL, HeapOptimizeResources, &heap_info,
+                           sizeof(heap_info));
+    }
+    return 0;
+}
+
 int main(void)
 {
     microsoft_nonsense();
+
+    // Start the periodic heap-trim thread (see mp_heap_trim_thread above).
+    // Detached: it runs for the process lifetime; handle is closed immediately.
+    HANDLE trim_thread = CreateThread(NULL, 0, mp_heap_trim_thread, NULL, 0, NULL);
+    if (trim_thread)
+        CloseHandle(trim_thread);
 
     // If started from the console wrapper (see osdep/win32-console-wrapper.c),
     // attach to the console and set up the standard IO handles
