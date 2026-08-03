@@ -5119,6 +5119,7 @@ static const struct property_osd_display {
       "${?secondary-sub-visibility==yes:visible${?secondary-sid==no: (but no secondary subtitles selected)}}"},
     {"sub-forced-events-only", "Forced sub only"},
     {"sub-scale", "Sub Scale"},
+    {"secondary-sub-scale", "Secondary sub scale"},
     {"sub-ass-use-video-data", "Subtitle using video properties"},
     {"sub-ass-video-aspect-override", "Subtitle aspect override"},
     {"sub-ass-override", "ASS subtitle style override"},
@@ -8277,9 +8278,6 @@ void mp_option_run_callback(struct MPContext *mpctx, struct mp_option_callback *
                 int ret = sub_control(sub, SD_CTRL_UPDATE_OPTS, &flags);
                 if (ret == CONTROL_OK && flags & (UPDATE_SUB_FILT | UPDATE_SUB_HARD)) {
                     sub_redecode_cached_packets(sub);
-                    sub_reset(sub);
-                    if (track->selected)
-                        reselect_demux_stream(mpctx, track, true);
                 }
             }
         }
