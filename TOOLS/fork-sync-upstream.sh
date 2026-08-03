@@ -21,7 +21,14 @@ git remote get-url upstream >/dev/null 2>&1 || \
 
 git fetch upstream
 git checkout custom
+
+# Keep the fork's master a plain mirror of upstream/master. It carries no
+# local commits, so this is always a fast-forward; update it without checking
+# it out (hence the checkout of custom above) so the working tree stays put.
+git push origin upstream/master:refs/heads/master
+git fetch origin master:master
+
 git merge --no-edit upstream/master
 git push origin custom
 
-echo "==> custom is up to date with upstream/master. Rebuild and test."
+echo "==> custom and master are up to date with upstream/master. Rebuild and test."
