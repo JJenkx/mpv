@@ -5743,7 +5743,7 @@ Network
     are not used for https URLs. Setting this option does not try to make the
     ytdl script use the proxy.
 
-``--http-segmented-connections=<0-16>``
+``--http-segmented-connections=<0-128>``
     Download http/https streams with this many parallel HTTP Range
     connections (default: 0, meaning disabled; 1 also disables it). Each
     connection fetches one fixed-size chunk ahead of the playback position,
@@ -5772,7 +5772,7 @@ Network
     headroom (default: yes). The size is capped at 4 times the requested
     ``--http-segmented-chunk-size`` and at a 1 GiB total window.
 
-``--http-segmented-prefetch-connections=<1-16>``
+``--http-segmented-prefetch-connections=<1-128>``
     Number of parallel connections the segmented downloader uses for a
     playlist entry that is being prefetched with
     ``--prefetch-playlist=immediate`` (default: 1). On promotion to the

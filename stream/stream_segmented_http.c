@@ -64,7 +64,7 @@
 
 #include "mpv_talloc.h"
 
-#define MAX_WORKERS 16
+#define MAX_WORKERS 128
 
 #define OPT_BASE_STRUCT struct segmented_http_opts
 struct segmented_http_opts {
