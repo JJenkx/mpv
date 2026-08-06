@@ -44,6 +44,10 @@
 #include <libavutil/frame.h>
 #include <libavutil/rational.h>
 
+#include <libplacebo/colorspace.h>
+#include <libplacebo/tone_mapping.h>
+#include <libplacebo/utils/libav.h>
+
 #include "mpv_talloc.h"
 #include "common/av_common.h"
 #include "common/common.h"
@@ -51,9 +55,13 @@
 #include "demux/packet.h"
 #include "demux/stheader.h"
 #include "input/cmd.h"
+#include "options/m_option.h"
+#include "options/options.h"
 #include "osdep/threads.h"
+#include "video/csputils.h"
 #include "video/img_format.h"
 #include "video/mp_image.h"
+#include "video/out/vo.h"
 #include "video/sws_utils.h"
 #include "core.h"
 #include "command.h"
@@ -150,12 +158,21 @@ done:
 
 // Scale to exactly out_w x out_h BGRA and write tightly-packed pixels to path,
 // via a temporary file + rename so a concurrent reader never sees a partial.
-static bool scale_and_write(AVFrame *av_frame,
+//
+// Beyond scaling, this: (1) applies the codec's intrinsic crop and the player's
+// --video-crop (autocrop) so the thumbnail matches what is shown; (2) preserves
+// the true DISPLAY aspect ratio -- accounting for non-square pixels / anamorphic
+// and Dolby Vision -- by fitting the frame into the output box with black
+// padding instead of stretching it (a plain scale-to-box squishes such content);
+// and (3) tone-maps HDR (PQ/HLG, BT.2020) down to SDR BT.709 with libplacebo's
+// spline tone-curve, since a plain transfer conversion blows out highlights.
+static bool scale_and_write(AVFrame *av_frame, const struct m_geometry *user_crop,
                             int out_w, int out_h, const char *path)
 {
     bool ok = false;
-    struct mp_image *src = NULL, *dst = NULL;
+    struct mp_image *src = NULL, *pq = NULL, *lin = NULL, *fit = NULL, *dst = NULL;
     struct mp_sws_context *sws = NULL;
+    float *lut = NULL;
     char *tmp = NULL;
     FILE *f = NULL;
 
@@ -163,16 +180,210 @@ static bool scale_and_write(AVFrame *av_frame,
     if (!src)
         goto done;
 
+    // Combine the codec's intrinsic crop with the player's --video-crop
+    // (autocrop). The player crop, when set, is resolved against the storage
+    // dimensions and replaces the intrinsic crop (same as apply_video_crop()).
+    struct mp_rect crop = src->params.crop;
+    if (user_crop && (user_crop->xy_valid ||
+        (user_crop->wh_valid && (user_crop->w > 0 || user_crop->h > 0)))) {
+        struct m_geometry gm = *user_crop;
+        struct mp_image_params tp = src->params;
+        m_rect_apply(&tp.crop, src->w, src->h, &gm);
+        if (mp_image_crop_valid(&tp))
+            crop = tp.crop;
+    }
+    if (mp_rect_w(crop) > 0 && mp_rect_h(crop) > 0 &&
+        (mp_rect_w(crop) != src->w || mp_rect_h(crop) != src->h))
+        mp_image_crop_rc(src, crop);
+
+    // True display size (accounts for pixel aspect ratio); scaling straight to
+    // out_w x out_h would squish anamorphic / DV content.
+    int d_w = 0, d_h = 0;
+    mp_image_params_get_dsize(&src->params, &d_w, &d_h);
+    if (d_w < 1)
+        d_w = src->w;
+    if (d_h < 1)
+        d_h = src->h;
+
+    // Fit d_w x d_h inside out_w x out_h preserving aspect (letterbox the rest).
+    int fit_w = out_w, fit_h = out_h;
+    if ((int64_t)d_w * out_h > (int64_t)d_h * out_w) {
+        fit_h = (int)((int64_t)d_h * out_w / d_w);
+    } else {
+        fit_w = (int)((int64_t)d_w * out_h / d_h);
+    }
+    fit_w = MPCLAMP(fit_w, 1, out_w);
+    fit_h = MPCLAMP(fit_h, 1, out_h);
+
+    bool is_hdr = src->params.color.transfer == PL_COLOR_TRC_PQ ||
+                  src->params.color.transfer == PL_COLOR_TRC_HLG;
+
+    if (is_hdr) {
+        // --- HDR: tone-map to SDR with libplacebo's spline curve ---------------
+        // Do the curve in PQ units (standardized, no linear-scale ambiguity):
+        //   (a) zimg: source -> PQ-encoded RGB, BT.2020, scaled to fit size;
+        //   (b) libplacebo LUT maps PQ -> normalized linear (1.0 = SDR white),
+        //       applied per channel (a light desaturation of extreme highlights
+        //       is the known trade-off of a per-channel CPU tone-map);
+        //   (c) zimg: linear BT.2020 -> SDR BT.709 gamma BGRA (gamut + OETF).
+
+        // (a)
+        pq = mp_image_alloc(IMGFMT_RGBA64, fit_w, fit_h);
+        if (!pq)
+            goto done;
+        mp_image_copy_attributes(pq, src);
+        struct mp_image_params pqp = {
+            .imgfmt = IMGFMT_RGBA64,
+            .w = fit_w, .h = fit_h, .p_w = 1, .p_h = 1,
+            .repr = { .sys = PL_COLOR_SYSTEM_RGB, .levels = PL_COLOR_LEVELS_FULL },
+            .color = { .primaries = PL_COLOR_PRIM_BT_2020,
+                       .transfer = PL_COLOR_TRC_PQ,
+                       .hdr = src->params.color.hdr },
+            .crop = {0, 0, fit_w, fit_h},
+        };
+        mp_image_params_guess_csp(&pqp);
+        pq->params = pqp;
+
+        sws = mp_sws_alloc(NULL);
+        if (!sws)
+            goto done;
+        sws->allow_zimg = true;
+        if (mp_sws_scale(sws, pq, src) < 0)
+            goto done;
+        TA_FREEP(&sws);
+
+        // (b) Build the PQ -> normalized-linear tone-map LUT.
+        float peak = src->params.color.hdr.max_luma;
+        if (!(peak > 0))
+            peak = src->params.color.hdr.max_cll;
+        if (!(peak > 0))
+            peak = 1000.0f;
+        struct pl_tone_map_params tm = {
+            .function = &pl_tone_map_spline,
+            .constants = { PL_TONE_MAP_CONSTANTS },
+            .input_scaling = PL_HDR_PQ,
+            .output_scaling = PL_HDR_NORM,
+            .lut_size = 4096,
+            .input_min = pl_hdr_rescale(PL_HDR_NITS, PL_HDR_PQ, PL_COLOR_HDR_BLACK),
+            .input_max = pl_hdr_rescale(PL_HDR_NITS, PL_HDR_PQ, peak),
+            .output_min = pl_hdr_rescale(PL_HDR_NITS, PL_HDR_NORM, PL_COLOR_HDR_BLACK),
+            .output_max = 1.0f,
+            .hdr = src->params.color.hdr,
+        };
+        pl_tone_map_params_infer(&tm);
+        lut = talloc_array(NULL, float, tm.lut_size);
+        if (!lut)
+            goto done;
+        pl_tone_map_generate(lut, &tm);
+
+        // Apply per channel: PQ code (0..65535) -> LUT -> normalized linear.
+        lin = mp_image_alloc(IMGFMT_RGBA64, fit_w, fit_h);
+        if (!lin)
+            goto done;
+        mp_image_copy_attributes(lin, pq);
+        struct mp_image_params linp = {
+            .imgfmt = IMGFMT_RGBA64,
+            .w = fit_w, .h = fit_h, .p_w = 1, .p_h = 1,
+            .repr = { .sys = PL_COLOR_SYSTEM_RGB, .levels = PL_COLOR_LEVELS_FULL },
+            .color = { .primaries = PL_COLOR_PRIM_BT_2020,
+                       .transfer = PL_COLOR_TRC_LINEAR },
+            .crop = {0, 0, fit_w, fit_h},
+        };
+        mp_image_params_guess_csp(&linp);
+        lin->params = linp;
+
+        float in_lo = tm.input_min;
+        float in_span = tm.input_max - tm.input_min;
+        if (!(in_span > 0))
+            in_span = 1.0f;
+        int last = (int)tm.lut_size - 1;
+        for (int y = 0; y < fit_h; y++) {
+            uint16_t *s = (uint16_t *)(pq->planes[0] + (ptrdiff_t)y * pq->stride[0]);
+            uint16_t *d = (uint16_t *)(lin->planes[0] + (ptrdiff_t)y * lin->stride[0]);
+            for (int x = 0; x < fit_w; x++) {
+                for (int c = 0; c < 3; c++) {
+                    float v = s[x * 4 + c] / 65535.0f;
+                    float t = (v - in_lo) / in_span;
+                    t = MPCLAMP(t, 0.0f, 1.0f);
+                    float fi = t * last;
+                    int i0 = (int)fi;
+                    int i1 = i0 < last ? i0 + 1 : last;
+                    float fr = fi - i0;
+                    float o = lut[i0] * (1.0f - fr) + lut[i1] * fr;
+                    o = MPCLAMP(o, 0.0f, 1.0f);
+                    d[x * 4 + c] = (uint16_t)(o * 65535.0f + 0.5f);
+                }
+                d[x * 4 + 3] = 65535;
+            }
+        }
+
+        // (c)
+        fit = mp_image_alloc(IMGFMT_BGRA, fit_w, fit_h);
+        if (!fit)
+            goto done;
+        mp_image_copy_attributes(fit, lin);
+        struct mp_image_params fp = {
+            .imgfmt = IMGFMT_BGRA,
+            .w = fit_w, .h = fit_h, .p_w = 1, .p_h = 1,
+            .repr = { .sys = PL_COLOR_SYSTEM_RGB, .levels = PL_COLOR_LEVELS_FULL },
+            .color = { .primaries = PL_COLOR_PRIM_BT_709,
+                       .transfer = PL_COLOR_TRC_UNKNOWN },
+            .light = MP_CSP_LIGHT_DISPLAY,
+            .crop = {0, 0, fit_w, fit_h},
+        };
+        mp_image_params_guess_csp(&fp);
+        fit->params = fp;
+
+        sws = mp_sws_alloc(NULL);
+        if (!sws)
+            goto done;
+        sws->allow_zimg = true;
+        if (mp_sws_scale(sws, fit, lin) < 0)
+            goto done;
+    } else {
+        // --- SDR: single conversion to BGRA, scaled to the fit size ----------
+        fit = mp_image_alloc(IMGFMT_BGRA, fit_w, fit_h);
+        if (!fit)
+            goto done;
+        mp_image_copy_attributes(fit, src);
+        struct mp_image_params fp = {
+            .imgfmt = IMGFMT_BGRA,
+            .w = fit_w, .h = fit_h, .p_w = 1, .p_h = 1,
+            .color = src->params.color,
+            .repr = src->params.repr,
+            .chroma_location = src->params.chroma_location,
+            .crop = {0, 0, fit_w, fit_h},
+        };
+        mp_image_params_guess_csp(&fp);
+        fp.color.primaries = PL_COLOR_PRIM_BT_709;
+        fp.color.transfer = PL_COLOR_TRC_UNKNOWN;
+        fp.light = MP_CSP_LIGHT_DISPLAY;
+        fp.color.hdr = (struct pl_hdr_metadata){0};
+        mp_image_params_guess_csp(&fp);
+        fit->params = fp;
+
+        sws = mp_sws_alloc(NULL);
+        if (!sws)
+            goto done;
+        sws->allow_zimg = true;
+        if (mp_sws_scale(sws, fit, src) < 0)
+            goto done;
+    }
+
+    // Compose onto a black out_w x out_h canvas, centered.
     dst = mp_image_alloc(IMGFMT_BGRA, out_w, out_h);
     if (!dst)
         goto done;
-
-    sws = mp_sws_alloc(NULL);
-    if (!sws)
-        goto done;
-    sws->allow_zimg = false;
-    if (mp_sws_scale(sws, dst, src) < 0)
-        goto done;
+    mp_image_clear(dst, 0, 0, out_w, out_h);
+    if (fit_w == out_w && fit_h == out_h) {
+        mp_image_copy(dst, fit);
+    } else {
+        struct mp_image sub = *dst;
+        int ox = (out_w - fit_w) / 2;
+        int oy = (out_h - fit_h) / 2;
+        mp_image_crop(&sub, ox, oy, ox + fit_w, oy + fit_h);
+        mp_image_copy(&sub, fit);
+    }
 
     tmp = talloc_asprintf(NULL, "%s.writing", path);
     f = fopen(tmp, "wb");
@@ -197,8 +408,12 @@ done:
     if (f)
         fclose(f);
     talloc_free(tmp);
+    talloc_free(lut);
     talloc_free(sws);
     talloc_free(dst);
+    talloc_free(fit);
+    talloc_free(lin);
+    talloc_free(pq);
     talloc_free(src);
     return ok;
 }
@@ -282,7 +497,7 @@ fail:
 
 static bool thumb_from_file(struct thumbnail_ctx *ctx, const char *filename,
                             double target, int out_w, int out_h,
-                            const char *path)
+                            const char *path, const struct m_geometry *user_crop)
 {
     bool ok = false;
     mp_mutex_lock(&ctx->lock);
@@ -328,7 +543,7 @@ static bool thumb_from_file(struct thumbnail_ctx *ctx, const char *filename,
         }
     }
     if (have_frame)
-        ok = scale_and_write(frame, out_w, out_h, path);
+        ok = scale_and_write(frame, user_crop, out_w, out_h, path);
     av_frame_free(&frame);
     av_packet_free(&pkt);
 
@@ -350,7 +565,8 @@ void mp_thumbnail_uninit(struct MPContext *mpctx)
 
 // Network path: decode the keyframe out of the already-buffered demuxer cache.
 static bool thumb_from_cache(struct MPContext *mpctx, double time,
-                             int out_w, int out_h, const char *path)
+                             int out_w, int out_h, const char *path,
+                             const struct m_geometry *user_crop)
 {
     struct demuxer *demuxer = mpctx->demuxer;
 
@@ -381,7 +597,7 @@ static bool thumb_from_cache(struct MPContext *mpctx, double time,
     if (have && npkts > 0) {
         AVFrame *frame = decode_target_frame(avp, pkts, npkts, time);
         if (frame) {
-            ok = scale_and_write(frame, out_w, out_h, path);
+            ok = scale_and_write(frame, user_crop, out_w, out_h, path);
             av_frame_free(&frame);
         }
     }
@@ -421,6 +637,13 @@ void cmd_thumbnail_cache(void *p)
                  demuxer->filename && demuxer->filename[0];
     char *filename = local ? talloc_strdup(NULL, demuxer->filename) : NULL;
 
+    // Snapshot the player's --video-crop (autocrop) while core-locked, so the
+    // thumbnail is cropped the same way the played video is. Copied by value
+    // because the worker phase below runs off the core lock.
+    struct m_geometry vcrop = {0};
+    if (mpctx->video_out)
+        vcrop = mpctx->video_out->opts->video_crop;
+
     // Lazily allocated; safe because the core lock is held here (concurrent
     // thumbnail-cache commands serialize on it before their worker phase).
     if (local && !mpctx->thumbnail_ctx) {
@@ -434,11 +657,11 @@ void cmd_thumbnail_cache(void *p)
     if (local) {
         struct thumbnail_ctx *ctx = mpctx->thumbnail_ctx;
         mp_core_unlock(mpctx);
-        ok = thumb_from_file(ctx, filename, time, out_w, out_h, path);
+        ok = thumb_from_file(ctx, filename, time, out_w, out_h, path, &vcrop);
         talloc_free(filename);
         mp_core_lock(mpctx);
     } else {
-        ok = thumb_from_cache(mpctx, time, out_w, out_h, path);
+        ok = thumb_from_cache(mpctx, time, out_w, out_h, path, &vcrop);
     }
 
     cmd->success = ok;
