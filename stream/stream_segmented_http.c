@@ -87,7 +87,7 @@ const struct m_sub_options stream_segmented_http_conf = {
     .size = sizeof(struct segmented_http_opts),
     .defaults = &(const struct segmented_http_opts){
         .chunks = 0,
-        .chunk_size = 10 * 1024 * 1024,
+        .chunk_size = 512 * 1024,
         .auto_size = true,
         .prefetch_chunks = 1,
     },

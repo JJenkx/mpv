@@ -5764,7 +5764,7 @@ Network
     is logged).
 
 ``--http-segmented-chunk-size=<size>``
-    Chunk size for ``--http-segmented-connections`` (default: 10MiB). Sizes
+    Chunk size for ``--http-segmented-connections`` (default: 512KiB). Sizes
     can use suffixes such as ``KiB``, ``MiB`` and ``GiB``.
 
 ``--http-segmented-auto-size=<yes|no>``
